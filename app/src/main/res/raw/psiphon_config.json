@@ -1,14 +1,8 @@
 {
   "PropagationChannelId": "92AACC5BABE0944C",
   "SponsorId": "1BC527D3D09985CF",
-  "EgressRegion": "",
-  "EstablishTunnelTimeoutSeconds": 0,
   "UseIndistinguishableTLS": true,
-  "RemoteServerListUrl": "https://s3.amazonaws.com/psiphon/web/mj2r-1378-293e/server_list",
-  "RemoteServerListSignaturePublicKey": "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEA...",
-  "ServerEntrySignaturePublicKey": "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEA...",
-  "ObfuscatedServerListDownloadURLs": [
-    "https://s3.amazonaws.com/psiphon/web/mj2r-1378-293e/server_list_compressed"
-  ],
-  "EnableSystemProxy": false
+  "EstablishTunnelTimeoutSeconds": 0,
+  "EmitBytesTransferred": true,
+  "EmitDiagnosticNotices": true
 }
