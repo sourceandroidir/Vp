@@ -1,0 +1,6 @@
+{
+  "name": "Psiphon VPN",
+  "description": "Secure Psiphon VPN client with whole device tunneling, server selection, upstream proxy, and split tunneling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
