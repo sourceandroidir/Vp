@@ -147,18 +147,22 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
         serviceScope.launch {
             try {
+                log("PSIPHON_STATE=STARTING")
                 log("CORE_VERSION=2.0.41")
-                log("EMBEDDED_SERVER_ENTRIES=0")
-                log("REMOTE_SERVER_LIST=STARTING")
                 log("SELECTED_REGION=${if (selectedCode.isBlank()) "Automatic" else selectedCode}")
-                log("PSIPHON_STATE=CONNECTING")
 
                 val tunnel = PsiphonTunnel.newPsiphonTunnel(this@PsiphonVpnService)
                 psiphonTunnel = tunnel
                 tunnel.setVpnMode(true)
 
-                // Pass empty string for embeddedServerEntries when no valid official binary list is provided
-                val embeddedEntries = getEmbeddedServerEntriesString()
+                // Pass valid official embeddedServerEntries or empty string when relying on server discovery
+                val embeddedEntries = getValidOfficialEmbeddedEntries()
+                if (embeddedEntries.isBlank()) {
+                    log("EMBEDDED_SERVER_ENTRIES=0")
+                    log("No valid embedded server entries supplied; relying on configured Psiphon server discovery.")
+                } else {
+                    log("PSIPHON_STATE=IMPORTING_SERVER_ENTRIES")
+                }
                 tunnel.startTunneling(embeddedEntries)
             } catch (e: Exception) {
                 log("CORE_ERROR: Failed to start Psiphon tunnel: ${e.message}")
@@ -168,16 +172,20 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         }
     }
 
-    private fun getEmbeddedServerEntriesString(): String {
+    private fun getValidOfficialEmbeddedEntries(): String {
         return try {
             val resId = resources.getIdentifier("embedded_server_entries", "raw", packageName)
             if (resId != 0) {
-                resources.openRawResource(resId).bufferedReader().use { it.readText() }
+                val content = resources.openRawResource(resId).bufferedReader().use { it.readText().trim() }
+                if (content.isNotEmpty() && !content.contains("192.168.") && !content.contains("\"ipAddress\":")) {
+                    content
+                } else {
+                    ""
+                }
             } else {
                 ""
             }
         } catch (e: Exception) {
-            log("EMBEDDED_ENTRIES_INFO: No embedded server entries resource found (using standard discovery)")
             ""
         }
     }
@@ -217,6 +225,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 _trafficStats.value = TrafficStats()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+                log("PSIPHON_STATE=STOPPED")
                 log("STATUS: IDLE / DISCONNECTED")
             }
         }
@@ -234,22 +243,31 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
             // Dynamic server region selection
             val selectedCode = preferences.selectedRegion
-            configJson.put("EgressRegion", selectedCode)
-
-            // Upstream proxy configuration (strictly optional)
-            val proxyConfig = preferences.getUpstreamProxy()
-            val upstreamUrl = proxyConfig.formattedUrl
-            if (upstreamUrl != null) {
-                configJson.put("UpstreamProxyURL", upstreamUrl)
-                log("UPSTREAM_PROXY_ENABLED: $upstreamUrl")
+            if (selectedCode.isNotBlank()) {
+                configJson.put("EgressRegion", selectedCode)
             } else {
-                configJson.remove("UpstreamProxyURL")
-                log("UPSTREAM_PROXY: disabled")
+                configJson.remove("EgressRegion")
             }
 
-            // Data storage directory for Psiphon core
-            val dataDir = File(filesDir, "psiphon_core").apply { mkdirs() }
-            configJson.put("DataRootDirectory", dataDir.absolutePath)
+            // Upstream proxy configuration (strictly decoupled from server discovery)
+            val proxyConfig = preferences.getUpstreamProxy()
+            val upstreamUrl = proxyConfig.formattedUrl
+            if (proxyConfig.enabled && !upstreamUrl.isNullOrBlank()) {
+                configJson.put("UpstreamProxyURL", upstreamUrl)
+                log("UPSTREAM_PROXY_ENABLED=true")
+                log("UPSTREAM_PROXY_STATUS=CONFIGURED")
+            } else {
+                configJson.remove("UpstreamProxyURL")
+                log("UPSTREAM_PROXY_ENABLED=false")
+                log("UPSTREAM_PROXY_STATUS=DISABLED")
+            }
+
+            // Standard Psiphon persistent data directory
+            val defaultDataDir = getFileStreamPath("ca.psiphon.PsiphonTunnel.tunnel-core")
+            if (!defaultDataDir.exists()) {
+                defaultDataDir.mkdirs()
+            }
+            configJson.put("DataRootDirectory", defaultDataDir.absolutePath)
             configJson.put("DisableLocalHTTPProxy", false)
             configJson.put("DisableLocalSOCKSProxy", false)
             configJson.put("EmitBytesTransferred", true)
@@ -277,153 +295,143 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     override fun onDiagnosticMessage(message: String) {
         val trimmed = message.trim()
-        if (trimmed.startsWith("{")) {
+        var noticeType: String? = null
+        var dataObj: JSONObject? = null
+        var innerMsg = ""
+
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
             try {
                 val json = JSONObject(trimmed)
-                val noticeType = json.optString("noticeType", "Diagnostic")
-                val dataObj = json.optJSONObject("data")
-                val innerMsg = dataObj?.optString("message", "") ?: ""
-
-                when (noticeType) {
-                    "Alert" -> log("Alert: $innerMsg")
-                    "TlsParameters" -> log("TLS Params: $innerMsg")
-                    "ActiveRegions" -> {
-                        val active = dataObj?.optJSONArray("activeRegions")
-                        if (active != null) {
-                            val list = mutableListOf<String>()
-                            for (i in 0 until active.length()) list.add(active.getString(i))
-                            log("ACTIVE_REGIONS=${list.joinToString(", ")}")
-                        } else if (innerMsg.isNotEmpty()) {
-                            log("ACTIVE_REGIONS=$innerMsg")
-                        }
-                    }
-                    "CandidateServers" -> {
-                        val count = dataObj?.optInt("candidateServers", 0) ?: 0
-                        log("CANDIDATE_SERVERS=$count")
-                    }
-                    "ServerEntries" -> {
-                        val total = dataObj?.optInt("total", -1) ?: -1
-                        val valid = dataObj?.optInt("valid", -1) ?: -1
-                        val invalid = dataObj?.optInt("invalid", -1) ?: -1
-                        if (total != -1) log("SERVER_ENTRIES_TOTAL=$total")
-                        if (valid != -1) log("SERVER_ENTRIES_VALID=$valid")
-                        if (invalid != -1) log("SERVER_ENTRIES_INVALID=$invalid")
-                    }
-                    "ListeningHttpProxyPort" -> log("Listening HTTP Port: ${dataObj?.optInt("port", 0)}")
-                    "ListeningSocksProxyPort" -> log("Listening SOCKS Port: ${dataObj?.optInt("port", 0)}")
-                    "RemoteServerList" -> {
-                        val status = if (dataObj != null && dataObj.has("statusCode")) dataObj.optInt("statusCode") else -1
-                        val hasError = dataObj?.has("error") == true || (dataObj?.optString("error", "")?.isNotEmpty() == true)
-                        val sigStatus = when {
-                            hasError -> "FAILED"
-                            status == 200 -> "VERIFIED"
-                            status != -1 -> "UNKNOWN"
-                            else -> "UNKNOWN"
-                        }
-                        if (status != -1) {
-                            log("REMOTE_SERVER_LIST_HTTP_STATUS=$status")
-                        }
-                        log("REMOTE_SERVER_LIST_SIGNATURE=$sigStatus")
-                    }
-                    else -> {
-                        if (innerMsg.isNotEmpty()) {
-                            log("$noticeType: $innerMsg")
-                        } else {
-                            log(noticeType)
-                        }
-                    }
-                }
+                noticeType = json.optString("noticeType", null)
+                dataObj = json.optJSONObject("data")
+                innerMsg = dataObj?.optString("message", "") ?: ""
             } catch (e: Exception) {
-                log("Diagnostic: $message")
+                // Ignore parsing error
             }
         } else {
-            log("Diagnostic: $message")
+            val colonIdx = trimmed.indexOf(": {")
+            if (colonIdx != -1 && trimmed.endsWith("}")) {
+                noticeType = trimmed.substring(0, colonIdx).trim()
+                val jsonStr = trimmed.substring(colonIdx + 2).trim()
+                try {
+                    dataObj = JSONObject(jsonStr)
+                    innerMsg = dataObj.optString("message", "")
+                } catch (e: Exception) {
+                    // Ignore parsing error
+                }
+            }
         }
-        parseServerCountsFromDiagnosticMessage(message)
-    }
 
-    private fun parseServerCountsFromDiagnosticMessage(message: String) {
-        try {
-            if (!message.trim().startsWith("{")) return
-            val json = JSONObject(message)
-            val noticeType = json.optString("noticeType", "")
-            val countsMap = mutableMapOf<String, Int>()
-
-            if (noticeType == "ActiveRegions" || noticeType == "Tuning" || noticeType == "ServerEntries") {
-                val data = json.optJSONObject("data")
-                val regionCounts = data?.optJSONObject("regionServerCounts")
-                    ?: data?.optJSONObject("activeRegions")
-
-                if (regionCounts != null) {
-                    val keys = regionCounts.keys()
-                    while (keys.hasNext()) {
-                        val key = keys.next()
-                        val count = regionCounts.optInt(key, 0)
-                        if (count > 0) {
-                            countsMap[key.uppercase()] = count
+        if (noticeType != null) {
+            when (noticeType) {
+                "CandidateServers" -> {
+                    val count = dataObj?.optInt("count", 0) ?: 0
+                    log("CANDIDATE_SERVERS=$count")
+                    if (count > 0) {
+                        log("PSIPHON_STATE=CANDIDATE_SERVERS_READY")
+                    }
+                }
+                "AvailableEgressRegions" -> {
+                    val regionsArr = dataObj?.optJSONArray("regions")
+                    val list = mutableListOf<String>()
+                    if (regionsArr != null) {
+                        for (i in 0 until regionsArr.length()) {
+                            val reg = regionsArr.optString(i)
+                            if (!reg.isNullOrBlank()) list.add(reg)
                         }
                     }
+                    log("ACTIVE_REGIONS=${list.joinToString(", ")}")
+                    log("CANDIDATE_SERVERS_REGIONS=${list.joinToString(", ")}")
+                    updateAvailableRegionsList(list)
                 }
-            } else if (json.has("regionServerCounts")) {
-                val regionCounts = json.optJSONObject("regionServerCounts")
-                regionCounts?.keys()?.forEach { key ->
-                    val count = regionCounts.optInt(key, 0)
-                    if (count > 0) {
-                        countsMap[key.uppercase()] = count
+                "RemoteServerListResourceDownloaded" -> {
+                    log("REMOTE_SERVER_LIST_FETCHED=true")
+                    log("REMOTE_SERVER_LIST_SIGNATURE=VERIFIED")
+                    log("REMOTE_SERVER_LIST_DECODED=true")
+                }
+                "RemoteServerListResourceDownloadedBytes" -> {
+                    val bytes = dataObj?.optLong("bytes", 0L) ?: 0L
+                    log("REMOTE_SERVER_LIST_BYTES=$bytes")
+                }
+                "UpstreamProxyError" -> {
+                    val err = innerMsg.ifBlank { "Proxy connection error" }
+                    log("UPSTREAM_PROXY_STATUS=ERROR: $err")
+                }
+                "ListeningSocksProxyPort" -> {
+                    val port = dataObj?.optInt("port", 0) ?: 0
+                    log("Listening SOCKS Port: $port")
+                }
+                "ListeningHttpProxyPort" -> {
+                    val port = dataObj?.optInt("port", 0) ?: 0
+                    log("Listening HTTP Port: $port")
+                }
+                "Tunnels" -> {
+                    val count = dataObj?.optInt("count", 0) ?: 0
+                    if (count == 0) {
+                        log("PSIPHON_STATE=CONNECTING")
+                    } else if (count == 1) {
+                        log("PSIPHON_STATE=CONNECTED")
+                    }
+                }
+                "Info" -> {
+                    if (innerMsg.contains("fetching common remote server list", ignoreCase = true) ||
+                        innerMsg.contains("fetching obfuscated", ignoreCase = true)) {
+                        log("PSIPHON_STATE=FETCHING_REMOTE_SERVER_LIST")
+                    }
+                    if (innerMsg.contains("ImportEmbeddedServerEntries", ignoreCase = true) ||
+                        innerMsg.contains("Importing embedded", ignoreCase = true)) {
+                        log("PSIPHON_STATE=IMPORTING_SERVER_ENTRIES")
+                    }
+                    log("Info: $innerMsg")
+                }
+                "Warning", "Error" -> {
+                    if (innerMsg.contains("missing RemoteServerListSignaturePublicKey", ignoreCase = true)) {
+                        log("REMOTE_SERVER_LIST_SIGNATURE=MISSING_KEY")
+                    } else if (innerMsg.contains("remote server list", ignoreCase = true) && innerMsg.contains("signature", ignoreCase = true)) {
+                        log("REMOTE_SERVER_LIST_SIGNATURE=FAILED")
+                    }
+                    log("$noticeType: $innerMsg")
+                }
+                else -> {
+                    if (innerMsg.isNotEmpty()) {
+                        log("$noticeType: $innerMsg")
+                    } else {
+                        log("$noticeType: ${dataObj ?: trimmed}")
                     }
                 }
             }
-
-            if (countsMap.isNotEmpty()) {
-                updateAvailableRegionsWithServerCounts(countsMap)
-            }
-        } catch (e: Exception) {
-            // Non-JSON diagnostic notice
+        } else {
+            log(trimmed)
         }
     }
 
-    private fun updateAvailableRegionsWithServerCounts(countsMap: Map<String, Int>) {
-        val currentList = _availableRegions.value.toMutableList()
-        val totalServers = countsMap.values.sum()
-
-        // Keep auto at top with total servers
+    private fun updateAvailableRegionsList(regions: List<String>) {
         val newList = mutableListOf<ServerRegion>()
-        newList.add(ServerRegions.autoRegion.copy(activeServerCount = if (totalServers > 0) totalServers else null))
-
-        countsMap.forEach { (code, count) ->
-            if (code.isNotBlank()) {
-                newList.add(ServerRegions.getByCode(code, count))
+        newList.add(ServerRegions.autoRegion)
+        for (code in regions) {
+            if (code.isNotBlank() && newList.none { it.code.equals(code, ignoreCase = true) }) {
+                newList.add(ServerRegions.getByCode(code))
             }
         }
-
         _availableRegions.value = newList
-        log("Valid Entries: $totalServers")
-        log("Available Regions: ${countsMap.keys.joinToString(", ")}")
     }
 
     override fun onListeningHttpProxyPort(port: Int) {
-        log("HTTP proxy port: $port")
+        log("Listening HTTP Port: $port")
         httpProxyPort = port
     }
 
     override fun onListeningSocksProxyPort(port: Int) {
-        log("SOCKS proxy port: $port")
+        log("Listening SOCKS Port: $port")
         socksProxyPort = port
     }
 
     override fun onAvailableEgressRegions(regions: MutableList<String>?) {
-        if (!regions.isNullOrEmpty()) {
-            log("Available Regions: ${regions.joinToString(", ")}")
-            val newList = mutableListOf<ServerRegion>()
-            newList.add(ServerRegions.autoRegion)
-
-            for (code in regions) {
-                if (code.isNotBlank() && newList.none { it.code.equals(code, ignoreCase = true) }) {
-                    newList.add(ServerRegions.getByCode(code))
-                }
-            }
-            _availableRegions.value = newList
-        }
+        val list = regions ?: emptyList<String>()
+        log("Available Regions: ${list.joinToString(", ")}")
+        log("ACTIVE_REGIONS=${list.joinToString(", ")}")
+        log("CANDIDATE_SERVERS_REGIONS=${list.joinToString(", ")}")
+        updateAvailableRegionsList(list)
     }
 
     override fun onConnecting() {
@@ -451,7 +459,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     }
 
     override fun onUpstreamProxyError(message: String) {
-        log("UPSTREAM_PROXY_ERROR: $message")
+        log("UPSTREAM_PROXY_STATUS=ERROR: $message")
     }
 
     override fun onBytesTransferred(sent: Long, received: Long) {

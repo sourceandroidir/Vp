@@ -20,27 +20,13 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `inspect PsiphonTunnel methods`() {
-    try {
-      val clazz = Class.forName("ca.psiphon.PsiphonTunnel")
-      val hostServiceClazz = Class.forName("ca.psiphon.PsiphonTunnel\$HostService")
-      println("--- HOST SERVICE METHODS ---")
-      for (method in hostServiceClazz.methods) {
-        val params = method.parameterTypes.map { it.simpleName }.joinToString(", ")
-        println("${method.returnType.simpleName} ${method.name}($params)")
-      }
-      println("--- PSIPHON TUNNEL METHODS ---")
-      for (method in clazz.declaredMethods) {
-        val params = method.parameterTypes.map { it.simpleName }.joinToString(", ")
-        println("${java.lang.reflect.Modifier.toString(method.modifiers)} ${method.returnType.simpleName} ${method.name}($params)")
-      }
-      println("--- PSIPHON TUNNEL FIELDS ---")
-      for (field in clazz.declaredFields) {
-        println("${java.lang.reflect.Modifier.toString(field.modifiers)} ${field.type.simpleName} ${field.name}")
-      }
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
+  fun `verify PsiphonTunnel default directory`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val clazz = Class.forName("ca.psiphon.PsiphonTunnel")
+    val defaultDirMethod = clazz.getDeclaredMethod("defaultDataRootDirectory", Context::class.java)
+    defaultDirMethod.isAccessible = true
+    val defaultDir = defaultDirMethod.invoke(null, context) as java.io.File
+    org.junit.Assert.assertTrue(defaultDir.path.contains("ca.psiphon.PsiphonTunnel.tunnel-core"))
   }
 
   @Test
