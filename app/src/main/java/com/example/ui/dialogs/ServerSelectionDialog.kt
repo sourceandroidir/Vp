@@ -212,7 +212,9 @@ fun ServerSelectionDialog(
                                     
                                     if (region.code.isEmpty()) {
                                         Text(
-                                            text = "اتصال خودکار به سریع‌ترین سرور ($serverCount سرور فعال)",
+                                            text = if (region.activeServerCount != null && region.activeServerCount > 0)
+                                                "اتصال خودکار به سریع‌ترین سرور (${region.activeServerCount} سرور فعال)"
+                                            else "اتصال خودکار به بهترین سرور کشف‌شده",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -223,12 +225,14 @@ fun ServerSelectionDialog(
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
-                                            Text(
-                                                text = " • $serverCount سرور فعال",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                fontWeight = FontWeight.Medium,
-                                                color = CyberCyan
-                                            )
+                                            if (region.activeServerCount != null && region.activeServerCount > 0) {
+                                                Text(
+                                                    text = " • ${region.activeServerCount} سرور فعال",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = CyberCyan
+                                                )
+                                            }
                                         }
                                     }
                                 }

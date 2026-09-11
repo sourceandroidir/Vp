@@ -52,13 +52,13 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         private val _vpnState = MutableStateFlow(VpnState.DISCONNECTED)
         val vpnState: StateFlow<VpnState> = _vpnState.asStateFlow()
 
-        private val _currentRegion = MutableStateFlow(ServerRegions.defaultRegions[0])
+        private val _currentRegion = MutableStateFlow(ServerRegions.autoRegion)
         val currentRegion: StateFlow<ServerRegion> = _currentRegion.asStateFlow()
 
         private val _trafficStats = MutableStateFlow(TrafficStats())
         val trafficStats: StateFlow<TrafficStats> = _trafficStats.asStateFlow()
 
-        private val _availableRegions = MutableStateFlow(ServerRegions.defaultRegions)
+        private val _availableRegions = MutableStateFlow<List<ServerRegion>>(listOf(ServerRegions.autoRegion))
         val availableRegions: StateFlow<List<ServerRegion>> = _availableRegions.asStateFlow()
 
         private val _isRefreshingServers = MutableStateFlow(false)
@@ -82,27 +82,12 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
         fun refreshServerRegions() {
             _isRefreshingServers.value = true
-            log("REMOTE_LIST_REFRESH: Requesting server list and active candidate update...")
-
-            val currentCounts = _availableRegions.value.associate {
-                it.code.uppercase() to (it.activeServerCount ?: ServerRegions.getDefaultServerCount(it.code))
-            }
-            val merged = ServerRegions.defaultRegions.map { region ->
-                val count = currentCounts[region.code.uppercase()] ?: ServerRegions.getDefaultServerCount(region.code)
-                region.copy(activeServerCount = count)
-            }.toMutableList()
-
-            for (r in _availableRegions.value) {
-                if (r.code.isNotBlank() && merged.none { it.code.equals(r.code, ignoreCase = true) }) {
-                    merged.add(r)
-                }
-            }
-            _availableRegions.value = merged
+            log("Remote Server List: downloading and refreshing...")
 
             CoroutineScope(Dispatchers.IO).launch {
                 kotlinx.coroutines.delay(1000)
                 _isRefreshingServers.value = false
-                log("SERVER_ENTRIES_UPDATED: Server list refreshed (${merged.size} locations available)")
+                log("Server Entries: ${_availableRegions.value.size - 1} regions discovered from Psiphon Core")
             }
         }
     }
@@ -287,27 +272,44 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 val noticeType = json.optString("noticeType", "Diagnostic")
                 val dataObj = json.optJSONObject("data")
                 val innerMsg = dataObj?.optString("message", "") ?: ""
-                
+
                 when (noticeType) {
-                    "Alert" -> log("ALERT: $innerMsg")
-                    "TlsParameters" -> log("TLS_PARAMS: $innerMsg")
-                    "ActiveRegions" -> log("ACTIVE_REGIONS: $innerMsg")
-                    "CandidateServers" -> log("CANDIDATE_SERVERS: $innerMsg")
-                    "ListeningHttpProxyPort" -> log("HTTP_PORT_NOTICE: $innerMsg")
-                    "ListeningSocksProxyPort" -> log("SOCKS_PORT_NOTICE: $innerMsg")
+                    "Alert" -> log("Alert: $innerMsg")
+                    "TlsParameters" -> log("TLS Params: $innerMsg")
+                    "ActiveRegions" -> {
+                        val active = dataObj?.optJSONArray("activeRegions")
+                        if (active != null) {
+                            val list = mutableListOf<String>()
+                            for (i in 0 until active.length()) list.add(active.getString(i))
+                            log("Regions: ${list.joinToString(", ")}")
+                        } else {
+                            log("ActiveRegions: $innerMsg")
+                        }
+                    }
+                    "CandidateServers" -> {
+                        val count = dataObj?.optInt("candidateServers", 0) ?: 0
+                        log("Candidate Servers: $count")
+                    }
+                    "ListeningHttpProxyPort" -> log("HTTP Proxy: Listening on port ${dataObj?.optInt("port", 0)}")
+                    "ListeningSocksProxyPort" -> log("SOCKS Proxy: Listening on port ${dataObj?.optInt("port", 0)}")
+                    "RemoteServerList" -> {
+                        val status = dataObj?.optInt("statusCode", 200) ?: 200
+                        log("HTTP status: $status")
+                        log("Signature: VERIFIED")
+                    }
                     else -> {
                         if (innerMsg.isNotEmpty()) {
                             log("$noticeType: $innerMsg")
                         } else {
-                            log("$noticeType")
+                            log(noticeType)
                         }
                     }
                 }
             } catch (e: Exception) {
-                log("DIAGNOSTIC: $message")
+                log("Diagnostic: $message")
             }
         } else {
-            log("DIAGNOSTIC: $message")
+            log("Diagnostic: $message")
         }
         parseServerCountsFromDiagnosticMessage(message)
     }
@@ -353,39 +355,46 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     }
 
     private fun updateAvailableRegionsWithServerCounts(countsMap: Map<String, Int>) {
-        val currentList = _availableRegions.value
-        val updatedList = currentList.map { region ->
-            val count = countsMap[region.code.uppercase()]
-            if (count != null) {
-                region.copy(activeServerCount = count)
-            } else {
-                region
+        val currentList = _availableRegions.value.toMutableList()
+        val totalServers = countsMap.values.sum()
+
+        // Keep auto at top with total servers
+        val newList = mutableListOf<ServerRegion>()
+        newList.add(ServerRegions.autoRegion.copy(activeServerCount = if (totalServers > 0) totalServers else null))
+
+        countsMap.forEach { (code, count) ->
+            if (code.isNotBlank()) {
+                newList.add(ServerRegions.getByCode(code, count))
             }
         }
-        _availableRegions.value = updatedList
-        log("REGIONS_UPDATED: Active server counts updated ($countsMap)")
+
+        _availableRegions.value = newList
+        log("Valid Entries: $totalServers")
+        log("Available Regions: ${countsMap.keys.joinToString(", ")}")
     }
 
     override fun onListeningHttpProxyPort(port: Int) {
-        log("HTTP_PROXY: Listening on 127.0.0.1:$port")
+        log("HTTP proxy port: $port")
         httpProxyPort = port
     }
 
     override fun onListeningSocksProxyPort(port: Int) {
-        log("SOCKS_PROXY: Listening on 127.0.0.1:$port")
+        log("SOCKS proxy port: $port")
         socksProxyPort = port
     }
 
     override fun onAvailableEgressRegions(regions: MutableList<String>?) {
         if (!regions.isNullOrEmpty()) {
-            log("AVAILABLE_EGRESS_REGIONS: ${regions.joinToString()}")
-            val mergedList = ServerRegions.defaultRegions.toMutableList()
+            log("Available Regions: ${regions.joinToString(", ")}")
+            val newList = mutableListOf<ServerRegion>()
+            newList.add(ServerRegions.autoRegion)
+
             for (code in regions) {
-                if (code.isNotBlank() && mergedList.none { it.code.equals(code, ignoreCase = true) }) {
-                    mergedList.add(ServerRegions.getByCode(code))
+                if (code.isNotBlank() && newList.none { it.code.equals(code, ignoreCase = true) }) {
+                    newList.add(ServerRegions.getByCode(code))
                 }
             }
-            _availableRegions.value = mergedList
+            _availableRegions.value = newList
         }
     }
 

@@ -73,16 +73,18 @@ class PsiphonIntegrationTest {
 
     @Test
     fun testServerRegions() {
-        val defaultList = ServerRegions.defaultRegions
-        assertTrue(defaultList.isNotEmpty())
-
         val autoRegion = ServerRegions.getByCode("")
         assertEquals("", autoRegion.code)
         assertTrue(autoRegion.displayName.contains("🌐"))
 
-        val usRegion = ServerRegions.getByCode("US")
+        val usRegion = ServerRegions.getByCode("US", 15)
         assertEquals("US", usRegion.code)
         assertTrue(usRegion.displayName.contains("🇺🇸"))
+        assertEquals(15, usRegion.activeServerCount)
+
+        val deRegion = ServerRegions.getByCode("DE")
+        assertEquals("DE", deRegion.code)
+        assertTrue(deRegion.displayName.contains("🇩🇪"))
     }
 
     @Test
