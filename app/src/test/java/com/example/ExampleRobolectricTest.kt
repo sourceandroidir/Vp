@@ -45,8 +45,12 @@ class ExampleRobolectricTest {
 
   @Test
   fun `verify default server regions available`() {
-    val regions = com.example.data.ServerRegions.defaultRegions
-    org.junit.Assert.assertTrue(regions.isNotEmpty())
-    org.junit.Assert.assertEquals("", regions[0].code)
+    val auto = com.example.data.ServerRegions.autoRegion
+    org.junit.Assert.assertEquals("", auto.code)
+    org.junit.Assert.assertTrue(auto.displayName.contains("🌐"))
+
+    val us = com.example.data.ServerRegions.getByCode("US", 10)
+    org.junit.Assert.assertEquals("US", us.code)
+    org.junit.Assert.assertEquals(10, us.activeServerCount)
   }
 }

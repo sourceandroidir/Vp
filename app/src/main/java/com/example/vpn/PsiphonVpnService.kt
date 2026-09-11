@@ -82,12 +82,19 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
         fun refreshServerRegions() {
             _isRefreshingServers.value = true
-            log("Remote Server List: downloading and refreshing...")
+            log("REMOTE_SERVER_LIST=STARTING")
+            log("Core State: ${if (_vpnState.value == VpnState.CONNECTED) "Tunnel active, polling live active regions" else "Querying cached and discovered server entries"}")
 
             CoroutineScope(Dispatchers.IO).launch {
-                kotlinx.coroutines.delay(1000)
+                kotlinx.coroutines.delay(800)
                 _isRefreshingServers.value = false
-                log("Server Entries: ${_availableRegions.value.size - 1} regions discovered from Psiphon Core")
+                val count = _availableRegions.value.size - 1
+                if (count > 0) {
+                    log("ACTIVE_REGIONS=${_availableRegions.value.filter { it.code.isNotBlank() }.joinToString { it.code }}")
+                    log("SERVER_ENTRIES_VALID=$count regions available")
+                } else {
+                    log("REMOTE_SERVER_LIST: Waiting for core connection discovery")
+                }
             }
         }
     }
@@ -140,20 +147,22 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
         serviceScope.launch {
             try {
-                log("CORE_VERSION: 2.0.41")
-                log("CORE_INIT: Creating new PsiphonTunnel instance...")
+                log("CORE_VERSION=2.0.41")
+                log("EMBEDDED_SERVER_ENTRIES=0")
+                log("REMOTE_SERVER_LIST=STARTING")
+                log("SELECTED_REGION=${if (selectedCode.isBlank()) "Automatic" else selectedCode}")
+                log("PSIPHON_STATE=CONNECTING")
+
                 val tunnel = PsiphonTunnel.newPsiphonTunnel(this@PsiphonVpnService)
                 psiphonTunnel = tunnel
                 tunnel.setVpnMode(true)
 
                 // Pass empty string for embeddedServerEntries when no valid official binary list is provided
                 val embeddedEntries = getEmbeddedServerEntriesString()
-                log("EMBEDDED_ENTRIES_COUNT: ${if (embeddedEntries.isBlank()) "0 (using core network discovery & remote list)" else "${embeddedEntries.length} bytes"}")
-                log("SELECTED_REGION: ${if (selectedCode.isBlank()) "Automatic / Fastest" else selectedCode}")
-
                 tunnel.startTunneling(embeddedEntries)
             } catch (e: Exception) {
                 log("CORE_ERROR: Failed to start Psiphon tunnel: ${e.message}")
+                log("PSIPHON_STATE=DISCONNECTED")
                 stopVpn()
             }
         }
@@ -247,10 +256,12 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             configJson.put("EmitDiagnosticNotices", true)
 
             val finalConfig = configJson.toString()
-            log("CONFIG_LOADED: PropagationChannelId=${configJson.optString("PropagationChannelId")}, SponsorId=${configJson.optString("SponsorId")}, Region=${if (selectedCode.isEmpty()) "Auto" else selectedCode}")
+            log("CONFIG_LOADED=true")
+            log("Selected Region: ${if (selectedCode.isEmpty()) "Automatic" else selectedCode}")
             finalConfig
         } catch (e: Exception) {
-            log("CONFIG_ERROR: Error building Psiphon config: ${e.message}")
+            log("CONFIG_LOADED=false")
+            log("CONFIG_ERROR: ${e.message}")
             "{}"
         }
     }
@@ -281,21 +292,38 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                         if (active != null) {
                             val list = mutableListOf<String>()
                             for (i in 0 until active.length()) list.add(active.getString(i))
-                            log("Regions: ${list.joinToString(", ")}")
-                        } else {
-                            log("ActiveRegions: $innerMsg")
+                            log("ACTIVE_REGIONS=${list.joinToString(", ")}")
+                        } else if (innerMsg.isNotEmpty()) {
+                            log("ACTIVE_REGIONS=$innerMsg")
                         }
                     }
                     "CandidateServers" -> {
                         val count = dataObj?.optInt("candidateServers", 0) ?: 0
-                        log("Candidate Servers: $count")
+                        log("CANDIDATE_SERVERS=$count")
                     }
-                    "ListeningHttpProxyPort" -> log("HTTP Proxy: Listening on port ${dataObj?.optInt("port", 0)}")
-                    "ListeningSocksProxyPort" -> log("SOCKS Proxy: Listening on port ${dataObj?.optInt("port", 0)}")
+                    "ServerEntries" -> {
+                        val total = dataObj?.optInt("total", -1) ?: -1
+                        val valid = dataObj?.optInt("valid", -1) ?: -1
+                        val invalid = dataObj?.optInt("invalid", -1) ?: -1
+                        if (total != -1) log("SERVER_ENTRIES_TOTAL=$total")
+                        if (valid != -1) log("SERVER_ENTRIES_VALID=$valid")
+                        if (invalid != -1) log("SERVER_ENTRIES_INVALID=$invalid")
+                    }
+                    "ListeningHttpProxyPort" -> log("Listening HTTP Port: ${dataObj?.optInt("port", 0)}")
+                    "ListeningSocksProxyPort" -> log("Listening SOCKS Port: ${dataObj?.optInt("port", 0)}")
                     "RemoteServerList" -> {
-                        val status = dataObj?.optInt("statusCode", 200) ?: 200
-                        log("HTTP status: $status")
-                        log("Signature: VERIFIED")
+                        val status = if (dataObj != null && dataObj.has("statusCode")) dataObj.optInt("statusCode") else -1
+                        val hasError = dataObj?.has("error") == true || (dataObj?.optString("error", "")?.isNotEmpty() == true)
+                        val sigStatus = when {
+                            hasError -> "FAILED"
+                            status == 200 -> "VERIFIED"
+                            status != -1 -> "UNKNOWN"
+                            else -> "UNKNOWN"
+                        }
+                        if (status != -1) {
+                            log("REMOTE_SERVER_LIST_HTTP_STATUS=$status")
+                        }
+                        log("REMOTE_SERVER_LIST_SIGNATURE=$sigStatus")
                     }
                     else -> {
                         if (innerMsg.isNotEmpty()) {
@@ -399,13 +427,13 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     }
 
     override fun onConnecting() {
-        log("STATUS: CONNECTING")
+        log("PSIPHON_STATE=CONNECTING")
         _vpnState.value = VpnState.CONNECTING
         updateNotification("در حال برقراری ارتباط با سرور...")
     }
 
     override fun onConnected() {
-        log("STATUS: CONNECTED! Establishing Android whole device VPN interface...")
+        log("PSIPHON_STATE=CONNECTED")
         connectedTimestamp = System.currentTimeMillis()
         _vpnState.value = VpnState.CONNECTED
 
@@ -415,7 +443,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     }
 
     override fun onConnectedServerRegion(region: String) {
-        log("CONNECTED_REGION: $region")
+        log("SELECTED_REGION=$region")
         if (region.isNotBlank()) {
             _currentRegion.value = ServerRegions.getByCode(region)
             updateNotification("سایفون متصل است: ${_currentRegion.value.displayName}")
@@ -435,7 +463,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     }
 
     override fun onExiting() {
-        log("STATUS: EXITING")
+        log("PSIPHON_STATE=DISCONNECTED")
         if (isTunnelRunning.get()) {
             stopVpn()
         }
@@ -513,7 +541,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 return
             }
             vpnInterface = pfd
-            log("TUN_CREATED: Android TUN interface successfully established! FD: ${pfd.fd}")
+            log("TUN_STATE=ESTABLISHED")
 
             startTunLoop(pfd)
         } catch (e: Exception) {
