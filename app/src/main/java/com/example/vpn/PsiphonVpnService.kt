@@ -156,8 +156,25 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 tunnel.setVpnMode(true)
 
                 // 3. Start Psiphon Core (relying on genuine Psiphon Core server discovery)
+                val embeddedEntriesSource = "none"
+                val embeddedEntries = ""
+                val isEmbeddedPresent = embeddedEntries.isNotEmpty()
+                log("EMBEDDED_ENTRIES_PRESENT=$isEmbeddedPresent")
+                log("EMBEDDED_ENTRIES_LENGTH=${embeddedEntries.length}")
+                log("EMBEDDED_ENTRIES_SOURCE=$embeddedEntriesSource")
+
+                // Diagnose presence of bootstrap config fields in generated JSON
+                val currentConfigStr = getPsiphonConfig()
+                val currentConfigJson = JSONObject(currentConfigStr)
+                log("REMOTE_SERVER_LIST_URLS_PRESENT=${currentConfigJson.has("RemoteServerListURLs")}")
+                log("REMOTE_SERVER_LIST_SIGNATURE_KEY_PRESENT=${currentConfigJson.has("RemoteServerListSignaturePublicKey")}")
+                log("OBFUSCATED_SERVER_LIST_URLS_PRESENT=${currentConfigJson.has("ObfuscatedServerListRootURLs")}")
+                log("SERVER_ENTRY_SIGNATURE_KEY_PRESENT=${currentConfigJson.has("ServerEntrySignaturePublicKey")}")
+                log("PROPAGATION_CHANNEL_ID_PRESENT=${currentConfigJson.has("PropagationChannelId")}")
+                log("SPONSOR_ID_PRESENT=${currentConfigJson.has("SponsorId")}")
+
                 log("PSIPHON_STATE=STARTING_CORE")
-                tunnel.startTunneling("")
+                tunnel.startTunneling(embeddedEntries)
             } catch (e: Exception) {
                 log("CORE_ERROR: Failed to start Psiphon tunnel: ${e.message}")
                 log("PSIPHON_STATE=DISCONNECTED")
