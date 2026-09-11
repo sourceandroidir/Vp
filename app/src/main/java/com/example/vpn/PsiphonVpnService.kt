@@ -31,13 +31,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import psi.Psi
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.io.IOException
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
 class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
@@ -85,24 +80,20 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             log("REMOTE_SERVER_LIST=STARTING")
             log("Core State: ${if (_vpnState.value == VpnState.CONNECTED) "Tunnel active, polling live active regions" else "Querying cached and discovered server entries"}")
 
-            CoroutineScope(Dispatchers.IO).launch {
-                kotlinx.coroutines.delay(800)
-                _isRefreshingServers.value = false
-                val count = _availableRegions.value.size - 1
-                if (count > 0) {
-                    log("ACTIVE_REGIONS=${_availableRegions.value.filter { it.code.isNotBlank() }.joinToString { it.code }}")
-                    log("SERVER_ENTRIES_VALID=$count regions available")
-                } else {
-                    log("REMOTE_SERVER_LIST: Waiting for core connection discovery")
-                }
+            val count = _availableRegions.value.size - 1
+            if (count > 0) {
+                log("ACTIVE_REGIONS=${_availableRegions.value.filter { it.code.isNotBlank() }.joinToString { it.code }}")
+                log("SERVER_ENTRIES_VALID=$count regions available")
+            } else {
+                log("REMOTE_SERVER_LIST: Waiting for core connection discovery")
             }
+            _isRefreshingServers.value = false
         }
     }
 
     private var psiphonTunnel: PsiphonTunnel? = null
     private var vpnInterface: ParcelFileDescriptor? = null
     private val isTunnelRunning = AtomicBoolean(false)
-    private var tunThread: Thread? = null
 
     private var httpProxyPort = 0
     private var socksProxyPort = 0
@@ -115,7 +106,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         super.onCreate()
         preferences = VpnPreferences(this)
         createNotificationChannel()
-        log("SERVICE_CREATED: PsiphonVpnService initialized with Psiphon Tunnel Core v2.0.41")
+        log("SERVICE_CREATED: PsiphonVpnService initialized with Psiphon Tunnel Core v2.0.39")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -148,45 +139,30 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         serviceScope.launch {
             try {
                 log("PSIPHON_STATE=STARTING")
-                log("CORE_VERSION=2.0.41")
+                log("CORE_VERSION=2.0.39")
                 log("SELECTED_REGION=${if (selectedCode.isBlank()) "Automatic" else selectedCode}")
 
+                // 1. Establish VPN interface (TUN)
+                val established = establishVpnInterface()
+                if (!established) {
+                    log("TUN_ERROR: Failed to establish VPN interface. Aborting startup.")
+                    stopVpn()
+                    return@launch
+                }
+
+                // 2. Initialize Psiphon tunnel instance with HostService
                 val tunnel = PsiphonTunnel.newPsiphonTunnel(this@PsiphonVpnService)
                 psiphonTunnel = tunnel
                 tunnel.setVpnMode(true)
 
-                // Pass valid official embeddedServerEntries or empty string when relying on server discovery
-                val embeddedEntries = getValidOfficialEmbeddedEntries()
-                if (embeddedEntries.isBlank()) {
-                    log("EMBEDDED_SERVER_ENTRIES=0")
-                    log("No valid embedded server entries supplied; relying on configured Psiphon server discovery.")
-                } else {
-                    log("PSIPHON_STATE=IMPORTING_SERVER_ENTRIES")
-                }
-                tunnel.startTunneling(embeddedEntries)
+                // 3. Start Psiphon Core (relying on genuine Psiphon Core server discovery)
+                log("PSIPHON_STATE=STARTING_CORE")
+                tunnel.startTunneling("")
             } catch (e: Exception) {
                 log("CORE_ERROR: Failed to start Psiphon tunnel: ${e.message}")
                 log("PSIPHON_STATE=DISCONNECTED")
                 stopVpn()
             }
-        }
-    }
-
-    private fun getValidOfficialEmbeddedEntries(): String {
-        return try {
-            val resId = resources.getIdentifier("embedded_server_entries", "raw", packageName)
-            if (resId != 0) {
-                val content = resources.openRawResource(resId).bufferedReader().use { it.readText().trim() }
-                if (content.isNotEmpty() && !content.contains("192.168.") && !content.contains("\"ipAddress\":")) {
-                    content
-                } else {
-                    ""
-                }
-            } else {
-                ""
-            }
-        } catch (e: Exception) {
-            ""
         }
     }
 
@@ -200,8 +176,13 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             try {
                 isTunnelRunning.set(false)
 
-                tunThread?.interrupt()
-                tunThread = null
+                try {
+                    psiphonTunnel?.stop()
+                } catch (e: Exception) {
+                    log("CORE_STOP_NOTE: ${e.message}")
+                }
+                psiphonTunnel = null
+                log("CORE_STOPPED: Psiphon Tunnel instance destroyed")
 
                 try {
                     vpnInterface?.close()
@@ -210,14 +191,6 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 }
                 vpnInterface = null
                 log("TUN_DESTROYED: VPN interface closed")
-
-                try {
-                    psiphonTunnel?.stop()
-                } catch (e: Exception) {
-                    log("CORE_STOP_NOTE: ${e.message}")
-                }
-                psiphonTunnel = null
-                log("CORE_STOPPED: Psiphon Tunnel instance destroyed")
             } catch (e: Exception) {
                 log("ERROR: Error during tunnel stop: ${e.message}")
             } finally {
@@ -263,7 +236,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             }
 
             // Standard Psiphon persistent data directory
-            val defaultDataDir = getFileStreamPath("ca.psiphon.PsiphonTunnel.tunnel-core")
+            val defaultDataDir = File(filesDir, "ca.psiphon.PsiphonTunnel.tunnel-core")
             if (!defaultDataDir.exists()) {
                 defaultDataDir.mkdirs()
             }
@@ -272,6 +245,13 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             configJson.put("DisableLocalSOCKSProxy", false)
             configJson.put("EmitBytesTransferred", true)
             configJson.put("EmitDiagnosticNotices", true)
+
+            // Official Psiphon Packet Tunnel routing: Pass the TUN file descriptor to Psiphon Core
+            val pfd = vpnInterface
+            if (pfd != null) {
+                configJson.put("PacketTunnelTunFileDescriptor", pfd.fd)
+                log("PACKET_TUNNEL_FD_CONFIGURED=${pfd.fd}")
+            }
 
             val finalConfig = configJson.toString()
             log("CONFIG_LOADED=true")
@@ -302,7 +282,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
             try {
                 val json = JSONObject(trimmed)
-                noticeType = json.optString("noticeType", null)
+                noticeType = json.optString("noticeType", "")
                 dataObj = json.optJSONObject("data")
                 innerMsg = dataObj?.optString("message", "") ?: ""
             } catch (e: Exception) {
@@ -322,7 +302,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             }
         }
 
-        if (noticeType != null) {
+        if (!noticeType.isNullOrBlank()) {
             when (noticeType) {
                 "CandidateServers" -> {
                     val count = dataObj?.optInt("count", 0) ?: 0
@@ -346,7 +326,6 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 }
                 "RemoteServerListResourceDownloaded" -> {
                     log("REMOTE_SERVER_LIST_FETCHED=true")
-                    log("REMOTE_SERVER_LIST_SIGNATURE=VERIFIED")
                     log("REMOTE_SERVER_LIST_DECODED=true")
                 }
                 "RemoteServerListResourceDownloadedBytes" -> {
@@ -360,10 +339,12 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 "ListeningSocksProxyPort" -> {
                     val port = dataObj?.optInt("port", 0) ?: 0
                     log("Listening SOCKS Port: $port")
+                    socksProxyPort = port
                 }
                 "ListeningHttpProxyPort" -> {
                     val port = dataObj?.optInt("port", 0) ?: 0
                     log("Listening HTTP Port: $port")
+                    httpProxyPort = port
                 }
                 "Tunnels" -> {
                     val count = dataObj?.optInt("count", 0) ?: 0
@@ -385,11 +366,6 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                     log("Info: $innerMsg")
                 }
                 "Warning", "Error" -> {
-                    if (innerMsg.contains("missing RemoteServerListSignaturePublicKey", ignoreCase = true)) {
-                        log("REMOTE_SERVER_LIST_SIGNATURE=MISSING_KEY")
-                    } else if (innerMsg.contains("remote server list", ignoreCase = true) && innerMsg.contains("signature", ignoreCase = true)) {
-                        log("REMOTE_SERVER_LIST_SIGNATURE=FAILED")
-                    }
                     log("$noticeType: $innerMsg")
                 }
                 else -> {
@@ -443,10 +419,10 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
     override fun onConnected() {
         log("PSIPHON_STATE=CONNECTED")
         connectedTimestamp = System.currentTimeMillis()
-        _vpnState.value = VpnState.CONNECTED
-
-        // Establish TUN interface strictly after genuine onConnected() callback
-        establishVpnInterface()
+        if (vpnInterface != null) {
+            _vpnState.value = VpnState.CONNECTED
+            log("VPN_ROUTING_ACTIVE=true")
+        }
         updateNotification("سایفون متصل است (${_currentRegion.value.displayName})")
     }
 
@@ -479,17 +455,34 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     // --- VPN Interface & Packet Handling ---
 
-    private fun establishVpnInterface() {
-        try {
+    private fun establishVpnInterface(): Boolean {
+        return try {
             vpnInterface?.close()
+            vpnInterface = null
+
+            val mtu = try {
+                val coreMtu = Psi.getPacketTunnelMTU()
+                if (coreMtu in 1200..1500) coreMtu.toInt() else 1500
+            } catch (e: Exception) {
+                1500
+            }
 
             val builder = Builder()
                 .setSession(getString(R.string.app_name))
-                .setMtu(1500)
+                .setMtu(mtu)
                 .addAddress("10.0.0.2", 24)
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("8.8.8.8")
                 .addDnsServer("1.1.1.1")
+
+            // Add IPv6 route support
+            try {
+                builder.addAddress("fd00::2", 64)
+                builder.addRoute("::", 0)
+                builder.addDnsServer("2001:4860:4860::8888")
+            } catch (e: Exception) {
+                log("IPv6_SETUP_NOTE: ${e.message}")
+            }
 
             // Configure Split Tunneling
             val splitConfig = preferences.getSplitTunnelConfig()
@@ -530,7 +523,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 }
             }
 
-            // Route HTTP/HTTPS via direct proxy in Android 10+ (API 29+)
+            // Route HTTP/HTTPS via direct proxy in Android 10+ (API 29+) if proxy port is available
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
                 if (httpProxyPort > 0) {
@@ -546,152 +539,15 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             val pfd = builder.establish()
             if (pfd == null) {
                 log("TUN_ERROR: VpnService.Builder.establish() returned null! Missing permission or revoked.")
-                return
+                return false
             }
             vpnInterface = pfd
-            log("TUN_STATE=ESTABLISHED")
-
-            startTunLoop(pfd)
+            log("TUN_STATE=ESTABLISHED (MTU: $mtu, FD: ${pfd.fd})")
+            true
         } catch (e: Exception) {
             log("TUN_ERROR: Error establishing VPN interface: ${e.message}")
+            false
         }
-    }
-
-    private fun startTunLoop(pfd: ParcelFileDescriptor) {
-        tunThread?.interrupt()
-        tunThread = Thread({
-            val inStream = FileInputStream(pfd.fileDescriptor)
-            val outStream = FileOutputStream(pfd.fileDescriptor)
-            val packet = ByteArray(32767)
-
-            log("TUN_LOOP: Packet processing loop started")
-            while (isTunnelRunning.get() && !Thread.currentThread().isInterrupted) {
-                try {
-                    val length = inStream.read(packet)
-                    if (length > 0) {
-                        handleTunPacket(packet, length, outStream)
-                    } else if (length < 0) {
-                        break
-                    }
-                } catch (e: IOException) {
-                    break
-                } catch (e: Exception) {
-                    // ignore and continue
-                }
-            }
-            log("TUN_LOOP: Packet processing loop ended")
-        }, "PsiphonTunThread").apply {
-            isDaemon = true
-            start()
-        }
-    }
-
-    private fun handleTunPacket(packet: ByteArray, length: Int, outStream: FileOutputStream) {
-        if (length < 20) return
-        val version = (packet[0].toInt() shr 4) and 0x0F
-        if (version != 4) return // IPv4
-
-        val protocol = packet[9].toInt() and 0xFF
-        val headerLen = (packet[0].toInt() and 0x0F) * 4
-
-        // UDP DNS query handling (destination port 53)
-        if (protocol == 17 && length >= headerLen + 8) {
-            val dstPort = ((packet[headerLen + 2].toInt() and 0xFF) shl 8) or
-                    (packet[headerLen + 3].toInt() and 0xFF)
-            if (dstPort == 53) {
-                forwardDnsPacket(packet, headerLen, length, outStream)
-            }
-        }
-    }
-
-    private fun forwardDnsPacket(
-        packet: ByteArray,
-        ipHeaderLen: Int,
-        totalLen: Int,
-        outStream: FileOutputStream
-    ) {
-        try {
-            val udpDataOffset = ipHeaderLen + 8
-            val udpDataLen = totalLen - udpDataOffset
-            if (udpDataLen <= 0) return
-
-            val dnsQuery = ByteArray(udpDataLen)
-            System.arraycopy(packet, udpDataOffset, dnsQuery, 0, udpDataLen)
-
-            val socket = DatagramSocket()
-            protect(socket)
-            socket.soTimeout = 2500
-
-            val dnsServer = InetAddress.getByName("8.8.8.8")
-            val sendPacket = DatagramPacket(dnsQuery, dnsQuery.size, dnsServer, 53)
-            socket.send(sendPacket)
-
-            val recvBuffer = ByteArray(2048)
-            val recvPacket = DatagramPacket(recvBuffer, recvBuffer.size)
-            socket.receive(recvPacket)
-            socket.close()
-
-            val dnsResponseLen = recvPacket.length
-            val responseIpTotal = ipHeaderLen + 8 + dnsResponseLen
-            val responsePacket = ByteArray(responseIpTotal)
-
-            // Build IPv4 response header swapping src and dst IP
-            System.arraycopy(packet, 0, responsePacket, 0, ipHeaderLen)
-            for (i in 0..3) {
-                val temp = responsePacket[12 + i]
-                responsePacket[12 + i] = responsePacket[16 + i]
-                responsePacket[16 + i] = temp
-            }
-            responsePacket[2] = ((responseIpTotal shr 8) and 0xFF).toByte()
-            responsePacket[3] = (responseIpTotal and 0xFF).toByte()
-            responsePacket[10] = 0
-            responsePacket[11] = 0
-            val ipChecksum = calculateChecksum(responsePacket, 0, ipHeaderLen)
-            responsePacket[10] = ((ipChecksum shr 8) and 0xFF).toByte()
-            responsePacket[11] = (ipChecksum and 0xFF).toByte()
-
-            // Build UDP header swapping ports
-            val udpOffset = ipHeaderLen
-            val srcPort = ((packet[udpOffset].toInt() and 0xFF) shl 8) or (packet[udpOffset + 1].toInt() and 0xFF)
-            val dstPort = ((packet[udpOffset + 2].toInt() and 0xFF) shl 8) or (packet[udpOffset + 3].toInt() and 0xFF)
-            responsePacket[udpOffset] = ((dstPort shr 8) and 0xFF).toByte()
-            responsePacket[udpOffset + 1] = (dstPort and 0xFF).toByte()
-            responsePacket[udpOffset + 2] = ((srcPort shr 8) and 0xFF).toByte()
-            responsePacket[udpOffset + 3] = (srcPort and 0xFF).toByte()
-
-            val udpTotal = 8 + dnsResponseLen
-            responsePacket[udpOffset + 4] = ((udpTotal shr 8) and 0xFF).toByte()
-            responsePacket[udpOffset + 5] = (udpTotal and 0xFF).toByte()
-            responsePacket[udpOffset + 6] = 0
-            responsePacket[udpOffset + 7] = 0
-
-            // Copy DNS payload
-            System.arraycopy(recvBuffer, 0, responsePacket, udpOffset + 8, dnsResponseLen)
-
-            synchronized(outStream) {
-                outStream.write(responsePacket)
-            }
-        } catch (e: Exception) {
-            // DNS resolution timeout or packet drop
-        }
-    }
-
-    private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
-        var sum = 0
-        var i = offset
-        while (i < offset + length - 1) {
-            val high = data[i].toInt() and 0xFF
-            val low = data[i + 1].toInt() and 0xFF
-            sum += (high shl 8) or low
-            i += 2
-        }
-        if (i < offset + length) {
-            sum += (data[i].toInt() and 0xFF) shl 8
-        }
-        while (sum shr 16 != 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
-        }
-        return sum.inv() and 0xFFFF
     }
 
     // --- Notifications ---

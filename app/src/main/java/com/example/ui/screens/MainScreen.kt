@@ -33,11 +33,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowForwardIos
-import androidx.compose.material.icons.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
+import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
@@ -220,7 +220,7 @@ fun MainScreen(viewModel: MainViewModel) {
                     ) {
                         Box {
                             Icon(
-                                imageVector = Icons.Default.CallSplit,
+                                imageVector = Icons.AutoMirrored.Filled.CallSplit,
                                 contentDescription = "اسپلیت تونل",
                                 tint = if (splitTunnelConfig.excludedPackages.isNotEmpty()) CyberCyan else MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -244,7 +244,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         modifier = Modifier.testTag("action_logs")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.ListAlt,
+                            imageVector = Icons.AutoMirrored.Filled.ListAlt,
                             contentDescription = "گزارشات",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -331,7 +331,7 @@ fun MainScreen(viewModel: MainViewModel) {
                     title = "اسپلیت تونل",
                     status = splitStatusText,
                     isActive = splitTunnelConfig.excludedPackages.isNotEmpty(),
-                    icon = Icons.Default.CallSplit,
+                    icon = Icons.AutoMirrored.Filled.CallSplit,
                     onClick = { showSplitDialog = true },
                     testTag = "card_split_tunnel"
                 )
@@ -621,7 +621,7 @@ private fun ServerSelectorCard(
             )
             Spacer(modifier = Modifier.width(4.dp))
             Icon(
-                imageVector = Icons.Default.ArrowForwardIos,
+                imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
                 contentDescription = null,
                 tint = CyberCyan,
                 modifier = Modifier.size(14.dp)
