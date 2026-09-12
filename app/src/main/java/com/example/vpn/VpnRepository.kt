@@ -31,7 +31,7 @@ class VpnRepository(private val context: Context) {
     }
 
     fun refreshServers() {
-        PsiphonVpnService.refreshServerRegions()
+        PsiphonVpnService.refreshServerRegions(context)
     }
 
     fun getSelectedRegion(): ServerRegion {

@@ -22,6 +22,7 @@ import com.example.data.model.SplitTunnelMode
 import com.example.data.model.TrafficStats
 import com.example.data.model.VpnState
 import com.example.data.preferences.VpnPreferences
+import com.example.util.PsiphonServerEntriesParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -62,6 +63,8 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         private val _logs = MutableStateFlow<List<String>>(emptyList())
         val logs: StateFlow<List<String>> = _logs.asStateFlow()
 
+        private var embeddedRegionCounts: Map<String, Int> = emptyMap()
+
         fun log(msg: String) {
             val formatted = if (msg.startsWith("[PSIPHON]")) msg else "[PSIPHON] $msg"
             Log.d(TAG, formatted)
@@ -75,10 +78,18 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
             _logs.value = emptyList()
         }
 
-        fun refreshServerRegions() {
+        fun refreshServerRegions(context: Context? = null) {
             _isRefreshingServers.value = true
             log("REMOTE_SERVER_LIST=STARTING")
-            log("Core State: ${if (_vpnState.value == VpnState.CONNECTED) "Tunnel active, polling live active regions" else "Querying cached and discovered server entries"}")
+
+            if (context != null) {
+                val parsed = PsiphonServerEntriesParser.getParsedServerRegions(context)
+                if (parsed.isNotEmpty()) {
+                    embeddedRegionCounts = PsiphonServerEntriesParser.parseServerEntriesCounts(context)
+                    _availableRegions.value = parsed
+                    log("EMBEDDED_PARSED_REGIONS_COUNT=${parsed.size}")
+                }
+            }
 
             val count = _availableRegions.value.size - 1
             if (count > 0) {
@@ -106,6 +117,14 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         super.onCreate()
         preferences = VpnPreferences(this)
         createNotificationChannel()
+
+        // Pre-populate available regions from embedded server entries if available
+        val initialRegions = PsiphonServerEntriesParser.getParsedServerRegions(this)
+        if (initialRegions.isNotEmpty()) {
+            embeddedRegionCounts = PsiphonServerEntriesParser.parseServerEntriesCounts(this)
+            _availableRegions.value = initialRegions
+        }
+
         log("SERVICE_CREATED: PsiphonVpnService initialized with Psiphon Tunnel Core v2.0.39")
     }
 
@@ -123,6 +142,18 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         return START_NOT_STICKY
     }
 
+    private fun loadEmbeddedPsiphonServerEntries(): String {
+        return try {
+            assets.open("server_entries.txt")
+                .bufferedReader(Charsets.UTF_8)
+                .use { it.readText() }
+                .trim()
+        } catch (e: Exception) {
+            log("EMBEDDED_ENTRIES_LOAD_ERROR=${e.message}")
+            ""
+        }
+    }
+
     private fun startVpn() {
         if (isTunnelRunning.get()) {
             log("START_ABORTED: VPN is already active or in progress")
@@ -138,8 +169,8 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
         serviceScope.launch {
             try {
+                log("PSIPHON_CORE_VERSION=2.0.39")
                 log("PSIPHON_STATE=STARTING")
-                log("CORE_VERSION=2.0.39")
                 log("SELECTED_REGION=${if (selectedCode.isBlank()) "Automatic" else selectedCode}")
 
                 // 1. Establish VPN interface (TUN)
@@ -155,26 +186,29 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 psiphonTunnel = tunnel
                 tunnel.setVpnMode(true)
 
-                // 3. Start Psiphon Core (relying on genuine Psiphon Core server discovery)
-                val embeddedEntriesSource = "none"
-                val embeddedEntries = ""
-                val isEmbeddedPresent = embeddedEntries.isNotEmpty()
+                // 3. Load Embedded Server Entries from Assets
+                val serverEntries = loadEmbeddedPsiphonServerEntries()
+                val isEmbeddedPresent = serverEntries.isNotBlank()
+                val lineCount = if (isEmbeddedPresent) serverEntries.lines().count { it.isNotBlank() } else 0
+                val embeddedSource = if (isEmbeddedPresent) "assets/server_entries.txt" else "none"
+
                 log("EMBEDDED_ENTRIES_PRESENT=$isEmbeddedPresent")
-                log("EMBEDDED_ENTRIES_LENGTH=${embeddedEntries.length}")
-                log("EMBEDDED_ENTRIES_SOURCE=$embeddedEntriesSource")
+                log("EMBEDDED_ENTRIES_LENGTH=${serverEntries.length}")
+                log("EMBEDDED_ENTRIES_LINE_COUNT=$lineCount")
+                log("EMBEDDED_ENTRIES_SOURCE=$embeddedSource")
 
                 // Diagnose presence of bootstrap config fields in generated JSON
                 val currentConfigStr = getPsiphonConfig()
                 val currentConfigJson = JSONObject(currentConfigStr)
-                log("REMOTE_SERVER_LIST_URLS_PRESENT=${currentConfigJson.has("RemoteServerListURLs")}")
-                log("REMOTE_SERVER_LIST_SIGNATURE_KEY_PRESENT=${currentConfigJson.has("RemoteServerListSignaturePublicKey")}")
-                log("OBFUSCATED_SERVER_LIST_URLS_PRESENT=${currentConfigJson.has("ObfuscatedServerListRootURLs")}")
-                log("SERVER_ENTRY_SIGNATURE_KEY_PRESENT=${currentConfigJson.has("ServerEntrySignaturePublicKey")}")
+                log("CONFIG_REMOTE_SERVER_LIST_URLS_PRESENT=${currentConfigJson.has("RemoteServerListURLs")}")
+                log("CONFIG_REMOTE_SERVER_LIST_SIGNATURE_KEY_PRESENT=${currentConfigJson.has("RemoteServerListSignaturePublicKey")}")
+                log("CONFIG_OSL_ROOT_URLS_PRESENT=${currentConfigJson.has("ObfuscatedServerListRootURLs")}")
+                log("CONFIG_SERVER_ENTRY_SIGNATURE_KEY_PRESENT=${currentConfigJson.has("ServerEntrySignaturePublicKey")}")
                 log("PROPAGATION_CHANNEL_ID_PRESENT=${currentConfigJson.has("PropagationChannelId")}")
                 log("SPONSOR_ID_PRESENT=${currentConfigJson.has("SponsorId")}")
 
                 log("PSIPHON_STATE=STARTING_CORE")
-                tunnel.startTunneling(embeddedEntries)
+                tunnel.startTunneling(serverEntries)
             } catch (e: Exception) {
                 log("CORE_ERROR: Failed to start Psiphon tunnel: ${e.message}")
                 log("PSIPHON_STATE=DISCONNECTED")
@@ -365,10 +399,12 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
                 }
                 "Tunnels" -> {
                     val count = dataObj?.optInt("count", 0) ?: 0
+                    log("TUNNEL_COUNT=$count")
                     if (count == 0) {
                         log("PSIPHON_STATE=CONNECTING")
-                    } else if (count == 1) {
+                    } else if (count >= 1) {
                         log("PSIPHON_STATE=CONNECTED")
+                        log("PSIPHON_CONNECTED=true")
                     }
                 }
                 "Info" -> {
@@ -400,12 +436,24 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     private fun updateAvailableRegionsList(regions: List<String>) {
         val newList = mutableListOf<ServerRegion>()
-        newList.add(ServerRegions.autoRegion)
+        val totalCount = embeddedRegionCounts.values.sum()
+        newList.add(ServerRegions.autoRegion.copy(activeServerCount = if (totalCount > 0) totalCount else null))
+
         for (code in regions) {
-            if (code.isNotBlank() && newList.none { it.code.equals(code, ignoreCase = true) }) {
-                newList.add(ServerRegions.getByCode(code))
+            val upperCode = code.trim().uppercase()
+            if (upperCode.isNotBlank() && newList.none { it.code.equals(upperCode, ignoreCase = true) }) {
+                val count = embeddedRegionCounts[upperCode]
+                newList.add(ServerRegions.getByCode(upperCode, count))
             }
         }
+
+        // If newly reported regions don't include all embedded ones, preserve remaining parsed ones
+        for ((code, count) in embeddedRegionCounts) {
+            if (newList.none { it.code.equals(code, ignoreCase = true) }) {
+                newList.add(ServerRegions.getByCode(code, count))
+            }
+        }
+
         _availableRegions.value = newList
     }
 
@@ -416,6 +464,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     override fun onListeningSocksProxyPort(port: Int) {
         log("Listening SOCKS Port: $port")
+        log("PSIPHON_SOCKS_PORT=$port")
         socksProxyPort = port
     }
 
@@ -424,6 +473,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
         log("Available Regions: ${list.joinToString(", ")}")
         log("ACTIVE_REGIONS=${list.joinToString(", ")}")
         log("CANDIDATE_SERVERS_REGIONS=${list.joinToString(", ")}")
+        log("AVAILABLE_EGRESS_REGIONS=${list.joinToString(", ")}")
         updateAvailableRegionsList(list)
     }
 
@@ -435,6 +485,7 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     override fun onConnected() {
         log("PSIPHON_STATE=CONNECTED")
+        log("PSIPHON_CONNECTED=true")
         connectedTimestamp = System.currentTimeMillis()
         if (vpnInterface != null) {
             _vpnState.value = VpnState.CONNECTED
@@ -445,8 +496,10 @@ class PsiphonVpnService : VpnService(), PsiphonTunnel.HostService {
 
     override fun onConnectedServerRegion(region: String) {
         log("SELECTED_REGION=$region")
+        log("PSIPHON_EXIT_REGION=$region")
         if (region.isNotBlank()) {
-            _currentRegion.value = ServerRegions.getByCode(region)
+            val count = embeddedRegionCounts[region.trim().uppercase()]
+            _currentRegion.value = ServerRegions.getByCode(region, count)
             updateNotification("سایفون متصل است: ${_currentRegion.value.displayName}")
         }
     }
